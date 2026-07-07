@@ -13,6 +13,7 @@ from discord import app_commands
 
 # ------------------------------------------------------------------ config
 TOKEN      = os.getenv("DISCORD_TOKEN")
+GUILD_ID   = 1471596336603205848
 CHANNEL_ID = 1523302337937146017
 LOGS_ID    = 1523302467553464403
 TIMEOUT    = 100
@@ -81,7 +82,7 @@ class DeobfBot(commands.Bot):
     async def setup_hook(self):
         self.http_session = aiohttp.ClientSession()
         self.loop.create_task(self._worker())
-        guild = discord.Object(id=1523302337937146017)
+        guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
 
@@ -108,9 +109,9 @@ class DeobfBot(commands.Bot):
         if not log_ch:
             return
 
-        msg = job["message"]
+        interaction = job["interaction"]
         name = job["name"]
-        user = msg.user
+        user = interaction.user
 
         color = GOOD if ok else (WARN if reason == "timeout" else BAD)
         e = discord.Embed(color=color, timestamp=datetime.now())
@@ -196,6 +197,12 @@ def _gather_jobs(interaction: discord.Interaction, attachment: discord.Attachmen
 @app_commands.command(name="deobf", description="Deobfusca código Lua")
 @app_commands.describe(attachment="Arquivo .lua ou .txt", url="Link raw do script")
 async def deobf(interaction: discord.Interaction, attachment: discord.Attachment = None, url: str = None):
+    if interaction.channel_id != CHANNEL_ID:
+        await interaction.response.send_message(
+            "Esse comando só funciona no canal de deobfuscação.", ephemeral=True
+        )
+        return
+
     if not attachment and not url:
         await interaction.response.send_message(
             "Anexe um arquivo ou forneça um URL.", ephemeral=True
