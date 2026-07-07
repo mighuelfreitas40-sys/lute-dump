@@ -12,12 +12,13 @@ import discord
 # ------------------------------------------------------------------ config
 TOKEN      = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1523302337937146017
-PREFIX     = ".l"
-TIMEOUT    = 100            # seconds per script before it gets skipped
-MAX_DL     = 8 * 1024 * 1024  # max bytes to pull from a raw link
+LOGS_ID    = 1523302467553464403
+TIMEOUT    = 100
+MAX_DL     = 8 * 1024 * 1024
 
 ROOT = pathlib.Path(__file__).resolve().parent
-LUTE = ROOT / "lute.exe"
+LUNE = ROOT / "lune"
+LUTE = ROOT / "lute"
 TMP  = ROOT / "bot_tmp"
 TMP.mkdir(exist_ok=True)
 
@@ -31,26 +32,20 @@ TIME_RE = re.compile(r"Finished processing in ([\d.]+) seconds", re.I)
 OK_EXT  = (".lua", ".txt")
 
 # ------------------------------------------------------------------ engine
-def _kill_tree(pid: int):
-    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                   capture_output=True)
-
 def _dump_blocking(in_rel: str, out_rel: str):
-    """Run the exact same pipeline as the CLI. Returns (ok, reason, took)."""
     env = os.environ.copy()
     env["HOOKOP_BIN"] = str(LUTE)
 
     started = time.perf_counter()
     proc = subprocess.Popen(
-        ["lune", "run", "main.luau", in_rel, f"out={out_rel}"],
+        [str(LUNE), "run", "main.luau", in_rel, f"out={out_rel}"],
         cwd=str(ROOT), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
     try:
         log, _ = proc.communicate(timeout=TIMEOUT)
     except subprocess.TimeoutExpired:
-        _kill_tree(proc.pid)
+        proc.kill()
         try: proc.communicate(timeout=5)
         except Exception: pass
         return False, "timeout", TIMEOUT
@@ -90,28 +85,22 @@ async def unreact(msg, emoji):
 
 
 async def gather_jobs(message) -> list[dict]:
-    """Pull every dumpable script out of a message (and the one it replies to)."""
-    sources = [message]
-    if message.reference and message.reference.resolved:
-        sources.append(message.reference.resolved)
-
     jobs, seen = [], set()
-    for src in sources:
-        for att in getattr(src, "attachments", []):
-            if att.filename.lower().endswith(OK_EXT) and att.id not in seen:
-                seen.add(att.id)
-                jobs.append({"name": att.filename, "att": att, "url": None})
+    for att in getattr(message, "attachments", []):
+        if att.filename.lower().endswith(OK_EXT) and att.id not in seen:
+            seen.add(att.id)
+            jobs.append({"name": att.filename, "att": att, "url": None})
 
-        text = getattr(src, "content", "") or ""
-        for url in URL_RE.findall(text):
-            url = url.rstrip(".,)`'\"")
-            if url == PREFIX or url in seen:
-                continue
-            seen.add(url)
-            name = url.split("?")[0].rstrip("/").split("/")[-1] or "script"
-            if not name.lower().endswith(OK_EXT):
-                name += ".lua"
-            jobs.append({"name": name, "att": None, "url": url})
+    text = getattr(message, "content", "") or ""
+    for url in URL_RE.findall(text):
+        url = url.rstrip(".,)`\'\"")
+        if url in seen:
+            continue
+        seen.add(url)
+        name = url.split("?")[0].rstrip("/").split("/")[-1] or "script"
+        if not name.lower().endswith(OK_EXT):
+            name += ".lua"
+        jobs.append({"name": name, "att": None, "url": url})
     return jobs
 
 
@@ -129,6 +118,33 @@ async def fetch_source(job) -> str:
         return b"".join(chunks).decode("utf-8", "ignore")
 
 
+async def send_log(job: dict, ok: bool, reason: str = None, took: float = 0):
+    log_ch = bot.get_channel(LOGS_ID)
+    if not log_ch:
+        return
+
+    msg = job["message"]
+    name = job["name"]
+    user = msg.author
+
+    color = GOOD if ok else (WARN if reason == "timeout" else BAD)
+    e = discord.Embed(color=color, timestamp=datetime.now())
+    e.set_author(name=f"{user}", icon_url=user.display_avatar.url)
+    e.add_field(name="Usuário", value=f"{user.mention} (`{user.id}`)", inline=False)
+    e.add_field(name="Arquivo", value=f"`{name}`", inline=True)
+    e.add_field(name="Status", value="✅ Sucesso" if ok else f"❌ {reason}", inline=True)
+    e.add_field(name="Tempo", value=f"`{took:.2f}s`", inline=True)
+
+    if ok:
+        out_path = job.get("out_path")
+        if out_path and out_path.exists():
+            with open(out_path, "rb") as fh:
+                await log_ch.send(embed=e, file=discord.File(fh, filename=name.replace(".lua", ".dump.lua")))
+            return
+
+    await log_ch.send(embed=e)
+
+
 async def worker():
     await bot.wait_until_ready()
     while True:
@@ -138,6 +154,7 @@ async def worker():
         in_rel  = f"bot_tmp/{stamp}.lua"
         out_rel = f"bot_tmp/{stamp}_out.lua"
         in_path, out_path = ROOT / in_rel, ROOT / out_rel
+        job["out_path"] = out_path
 
         await unreact(message, "🕓")
         await react(message, "⏳")
@@ -150,22 +167,22 @@ async def worker():
             if ok:
                 data = out_path.read_text(errors="ignore")
                 lines = data.count("\n") + 1
-                e = discord.Embed(color=GOOD, timestamp=datetime.now())
-                e.description = (
-                    f"**`{name}`**\n"
-                    f"`{lines:,} lines` · `{len(data)/1024:.1f} KB` · `{took:.2f}s`"
-                )
-                e.set_footer(text="69ms")
                 out_name = re.sub(r"\.(lua|txt)$", "", name, flags=re.I) + ".dump.lua"
                 with open(out_path, "rb") as fh:
-                    await message.reply(
-                        content=message.author.mention,
-                        embed=e,
-                        file=discord.File(fh, filename=out_name),
-                        mention_author=True,
-                    )
+                    try:
+                        await message.author.send(
+                            content="Script desfuscado com sucesso, e enviado na sua dm",
+                            file=discord.File(fh, filename=out_name),
+                        )
+                    except discord.Forbidden:
+                        await message.reply(
+                            content="Não consegui enviar DM. Verifique suas configurações de privacidade.",
+                            mention_author=True,
+                        )
+
                 await unreact(message, "⏳")
                 await react(message, "✅")
+                await send_log(job, True, took=took)
             else:
                 label = "skipped — took over 100s" if reason == "timeout" else reason
                 e = discord.Embed(color=WARN if reason == "timeout" else BAD,
@@ -176,6 +193,7 @@ async def worker():
                                     mention_author=True)
                 await unreact(message, "⏳")
                 await react(message, "⏱️" if reason == "timeout" else "❌")
+                await send_log(job, False, reason=reason, took=took)
 
         except Exception as ex:
             e = discord.Embed(color=BAD, timestamp=datetime.now())
@@ -188,6 +206,7 @@ async def worker():
                 pass
             await unreact(message, "⏳")
             await react(message, "❌")
+            await send_log(job, False, reason=str(ex)[:300], took=0)
         finally:
             for p in (in_path, out_path):
                 try: p.unlink()
@@ -202,7 +221,7 @@ async def on_ready():
         http = aiohttp.ClientSession()
     bot.loop.create_task(worker())
     await bot.change_presence(activity=discord.Activity(
-        type=discord.ActivityType.watching, name=f"{PREFIX} · dumps"))
+        type=discord.ActivityType.watching, name="/deobf · dumps"))
     print(f"online as {bot.user} · channel {CHANNEL_ID}")
 
 
@@ -211,15 +230,14 @@ async def on_message(message):
     if message.author.bot or message.channel.id != CHANNEL_ID:
         return
 
-    content = message.content.strip()
-    if not (content == PREFIX or content.lower().startswith(PREFIX + " ")
-            or content.lower().startswith(PREFIX + "\n")):
+    content = message.content.strip().lower()
+    if not content.startswith("/deobf"):
         return
 
     jobs = await gather_jobs(message)
     if not jobs:
         e = discord.Embed(color=ACCENT, description=(
-            f"attach a `.lua`/`.txt`, drop a raw link, or reply to one with `{PREFIX}`."
+            "Anexe um `.lua`/`.txt`, cole um link raw, ou use `/deobf <url>`."
         ))
         e.set_footer(text="69ms")
         await message.reply(embed=e, mention_author=False)
