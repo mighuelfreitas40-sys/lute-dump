@@ -92,9 +92,10 @@ class DeobfBot(commands.Bot):
         print(f"online as {self.user}")
 
     async def _fetch_source(self, job: dict) -> str:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; DeobfBot/1.0)"}
         if job["att"] is not None:
             return (await job["att"].read()).decode("utf-8", "ignore")
-        async with self.http_session.get(job["url"], timeout=aiohttp.ClientTimeout(total=30)) as r:
+        async with self.http_session.get(job["url"], headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as r:
             r.raise_for_status()
             chunks, total = [], 0
             async for part in r.content.iter_chunked(65536):
