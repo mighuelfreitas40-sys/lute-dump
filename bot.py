@@ -11,7 +11,7 @@ import discord
 
 # ------------------------------------------------------------------ config
 TOKEN      = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = 1511155261770043422
+CHANNEL_ID = 1523302337937146017
 PREFIX     = ".l"
 TIMEOUT    = 100            # seconds per script before it gets skipped
 MAX_DL     = 8 * 1024 * 1024  # max bytes to pull from a raw link
